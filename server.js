@@ -21,6 +21,27 @@ app.get('/health', (_req, res) => {
 
 app.post('/render', async (req, res) => {
   try {
+        console.log('Render request received');
+    console.log(JSON.stringify({
+      project_id: req.body?.project_id || '',
+      format: req.body?.format || '',
+      selected_assets_count: Array.isArray(req.body?.selected_assets)
+        ? req.body.selected_assets.length
+        : 'not_array',
+      scenes_count: Array.isArray(req.body?.scenes)
+        ? req.body.scenes.length
+        : 'not_array',
+      has_voice_url: !!(
+        req.body?.voice_url ||
+        req.body?.voice_file_url ||
+        req.body?.voice_public_url
+      ),
+      has_music_url: !!(
+        req.body?.music_url ||
+        req.body?.music_file_url
+      )
+    }));
+    
     if (RENDER_TOKEN && req.header('x-render-token') !== RENDER_TOKEN) {
       return res.status(401).json({ status: 'failed', error: 'Unauthorized' });
     }
@@ -144,8 +165,8 @@ app.post('/render', async (req, res) => {
       long_video_public_url: job.format === 'short' ? '' : renderUrl,
       public_url: renderUrl
     });
-  } catch (error) {
-    console.error(error);
+    } catch (error) {
+    console.error('Render failed:', error);
     res.status(500).json({
       status: 'failed',
       error: error.message || String(error)
