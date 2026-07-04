@@ -173,7 +173,148 @@ app.post('/render', async (req, res) => {
     });
   }
 });
+app.post('/stitch', async (req, res) => {
+  try {
+    console.log('Stitch request received');
+    console.log(JSON.stringify({
+      project_id: req.body?.project_id || '',
+      chunk_count: Array.isArray(req.body?.chunk_urls) ? req.body.chunk_urls.length : 'not_array',
+      has_voice_url: !!(
+        req.body?.voice_url ||
+        req.body?.voice_file_url ||
+        req.body?.voice_public_url
+      ),
+      has_music_url: !!(
+        req.body?.music_url ||
+        req.body?.music_file_url
+      )
+    }));
 
+    if (RENDER_TOKEN && req.header('x-render-token') !== RENDER_TOKEN) {
+      return res.status(401).json({ status: 'failed', error: 'Unauthorized' });
+    }
+
+    const job = req.body || {};
+    const projectId = safeName(job.project_id || 'project');
+    const stitchId = safeName(job.render_id || `stitch_${crypto.randomUUID()}`);
+    const chunks = Array.isArray(job.chunk_urls) ? job.chunk_urls : [];
+
+    if (!chunks.length) {
+      return res.status(400).json({
+        status: 'failed',
+        error: 'No chunk_urls supplied'
+      });
+    }
+
+    const jobDir = path.join(WORK_DIR, `${projectId}-${stitchId}`);
+    await fs.mkdir(jobDir, { recursive: true });
+
+    const chunkFiles = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const url = typeof chunk === 'string' ? chunk : chunk.url;
+
+      if (!url) continue;
+
+      const chunkPath = path.join(jobDir, `chunk-${i}.mp4`);
+      await download(url, chunkPath);
+      chunkFiles.push(chunkPath);
+    }
+
+    if (!chunkFiles.length) {
+      return res.status(400).json({
+        status: 'failed',
+        error: 'No valid chunk files downloaded'
+      });
+    }
+
+    const concatFile = path.join(jobDir, 'chunks.txt');
+    await fs.writeFile(
+      concatFile,
+      chunkFiles.map(file => `file '${file.replaceAll("'", "'\\''")}'`).join('\n')
+    );
+
+    const stitchedVideo = path.join(jobDir, 'stitched-video.mp4');
+
+    await run('ffmpeg', [
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatFile,
+      '-c', 'copy',
+      stitchedVideo
+    ]);
+
+    const voiceUrl = job.voice_url || job.voice_file_url || job.voice_public_url;
+    const musicUrl = job.music_url || job.music_file_url || '';
+
+    const outputName = safeName(
+      job.output_name || `${projectId}_long_video`
+    ) + '.mp4';
+
+    const outputPath = path.join(WORK_DIR, outputName);
+
+    if (voiceUrl) {
+      const voicePath = path.join(jobDir, `voice${extensionFromUrl(voiceUrl, '.mp3')}`);
+      await download(voiceUrl, voicePath);
+
+      if (musicUrl) {
+        const musicPath = path.join(jobDir, `music${extensionFromUrl(musicUrl, '.mp3')}`);
+        await download(musicUrl, musicPath);
+
+        await run('ffmpeg', [
+          '-y',
+          '-i', stitchedVideo,
+          '-i', voicePath,
+          '-i', musicPath,
+          '-filter_complex',
+          '[1:a]volume=1.0[narration];[2:a]volume=0.12[music];[narration][music]amix=inputs=2:duration=first[aout]',
+          '-map', '0:v',
+          '-map', '[aout]',
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-shortest',
+          outputPath
+        ]);
+      } else {
+        await run('ffmpeg', [
+          '-y',
+          '-i', stitchedVideo,
+          '-i', voicePath,
+          '-map', '0:v',
+          '-map', '1:a',
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-shortest',
+          outputPath
+        ]);
+      }
+    } else {
+      await fs.copyFile(stitchedVideo, outputPath);
+    }
+
+    const base = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const finalUrl = `${base}/files/${encodeURIComponent(outputName)}`;
+
+    res.json({
+      status: 'complete',
+      project_id: job.project_id || '',
+      render_id: stitchId,
+      file: outputName,
+      render_url: finalUrl,
+      long_video_public_url: finalUrl,
+      public_url: finalUrl,
+      chunk_count: chunkFiles.length
+    });
+  } catch (error) {
+    console.error('Stitch failed:', error);
+    res.status(500).json({
+      status: 'failed',
+      error: error.message || String(error)
+    });
+  }
+});
 function normalizeScenes(job) {
   if (Array.isArray(job.scenes)) return job.scenes;
   if (Array.isArray(job.timeline?.scenes)) return job.timeline.scenes;
